@@ -24,5 +24,3 @@ _testmain.go
 *.prof
 
 README-orig.md
-
-simple-parser-go
