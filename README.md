@@ -7,15 +7,15 @@
 Install
 -----
 ```
-go get github.com/keremgocen/tagparser
+go get github.com/keremgocen/tagpipe
 ```
 
 Usage
 -----
-Inside the project root folder;
+
 
 ```
-./tagparser tag1 tag2 ..
+./cmd tag1 tag2 ..
 ```
 
 Corner Cases

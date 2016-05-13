@@ -1,19 +1,26 @@
-package tagparser
+package tagpipe
 
 import (
 	"bufio"
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 )
+
+// TODO - add doc
+type result struct {
+	path string
+	sum  [md5.Size]byte
+	err  error
+}
 
 // FileCache holds info of each file, including tags observed per file
 type FileCache struct {
@@ -43,6 +50,78 @@ func Check(e error) {
 	if e != nil {
 		panic(e)
 	}
+}
+
+// sumFiles starts goroutines to walk the directory tree at root and digest each
+// regular file.  These goroutines send the results of the digests on the result
+// channel and send the result of the walk on the error channel.  If done is
+// closed, sumFiles abandons its work.
+func sumFiles(done <-chan struct{}, root string) (<-chan result, <-chan error) {
+	// For each regular file, start a goroutine that sums the file and sends
+	// the result on c.  Send the result of the walk on errc.
+	c := make(chan result)
+	errc := make(chan error, 1)
+	go func() { // HL
+		var wg sync.WaitGroup
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				return nil
+			}
+			wg.Add(1)
+			go func() { // HL
+				data, err := ioutil.ReadFile(path)
+				select {
+				case c <- result{path, md5.Sum(data), err}: // HL
+				case <-done: // HL
+				}
+				wg.Done()
+			}()
+			// Abort the walk if done is closed.
+			select {
+			case <-done: // HL
+				return errors.New("walk canceled")
+			default:
+				return nil
+			}
+		})
+		// Walk has returned, so all calls to wg.Add are done.  Start a
+		// goroutine to close c once all the sends are done.
+		go func() { // HL
+			wg.Wait()
+			close(c) // HL
+		}()
+		// No select needed here, since errc is buffered.
+		errc <- err // HL
+	}()
+	return c, errc
+}
+
+// MD5All reads all the files in the file tree rooted at root and returns a map
+// from file path to the MD5 sum of the file's contents.  If the directory walk
+// fails or any read operation fails, MD5All returns an error.  In that case,
+// MD5All does not wait for inflight read operations to complete.
+func MD5All(root string) (map[string][md5.Size]byte, error) {
+	// MD5All closes the done channel when it returns; it may do so before
+	// receiving all the values from c and errc.
+	done := make(chan struct{}) // HLdone
+	defer close(done)           // HLdone
+
+	c, errc := sumFiles(done, root) // HLdone
+
+	m := make(map[string][md5.Size]byte)
+	for r := range c { // HLrange
+		if r.err != nil {
+			return nil, r.err
+		}
+		m[r.path] = r.sum
+	}
+	if err := <-errc; err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // CountTagsInFile counts all given tags inside the file
@@ -125,69 +204,9 @@ func TimeTrack(start time.Time, name string) {
 	fmt.Printf("\n%s took %s\n\n", name, elapsed)
 }
 
-func main() {
-	defer TimeTrack(time.Now(), "total execution")
-
-	const dataPath = "data/"
-	var tags []string
-	Cache = make(map[string]FileCache)
-	tM := make(map[string]int) // tag map keeping total counts
-
-	files, _ := ioutil.ReadDir(dataPath)
-
-	if len(os.Args[1:]) > 0 { // os.Args[1:] holds the arguments to the program.
-		tags = os.Args[1:]
-	} else { // parse arguments from 'tags.txt'
-		fmt.Println("Missing command-line arguments! Fetching from file `tags.txt`..")
-		dat, err := ioutil.ReadFile("tags.txt")
-		Check(err)
-		tags = strings.Fields(string(dat))
-	}
-
-	for _, f := range files { // search for tags in each file asynchronously
-
-		// lookup for file in cache, avoid parsing again
-		// fmt.Println("--metadata name:", f.Name(), " mod_time:", f.ModTime(), " size:", f.Size())
-		md5Str := f.Name() + f.ModTime().String() + string(f.Size())
-		hash := md5.New()
-		io.WriteString(hash, md5Str)
-		fmt.Printf("\nfile:%s, md5:%x\n", f.Name(), hash.Sum(nil))
-
-		content, err := ioutil.ReadFile(dataPath + f.Name())
-		Check(err)
-
-		fileHasValidJSON := IsValidJSON(string(content))
-
-		if fileHasValidJSON {
-			// fmt.Printf("contents:%s,  \nisJSON:%v\n---------------------\n", string(content), true)
-			for _, tag := range tags {
-				r, _ := regexp.Compile(tag)
-				c := len(r.FindAllString(string(content), -1))
-				if c > 0 {
-					tM[tag]++
-				}
-				fmt.Println("tag:", tag, " - count:", c)
-				// if r.Match(content) {
-				// 	fmt.Println("found tag:", tag, " in file:", f.Name(), " count:")
-				// }
-			}
-			fmt.Printf("---------------------\n")
-		} else {
-			fmt.Println("skipping file ", f.Name(), " with invalid JSON")
-			fmt.Println("---------------------")
-		}
-
-	}
-
-	sT := make(SortedTagCounts, len(tM))
-	i := 0
-	for k, v := range tM {
-		sT[i] = TagCount{k, v}
-		i++
-	}
-	sort.Sort(sort.Reverse(sT))
-
-	fmt.Println("tag map:", tM)
-	fmt.Println("sorted tag map:", sT)
-
-}
+// func main() {
+// 	defer TimeTrack(time.Now(), "total execution")
+//
+//
+//
+// }
