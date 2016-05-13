@@ -1,6 +1,9 @@
 'A simple JSON tag parser'
 =====
 
+[![Go Report Card](https://goreportcard.com/badge/github.com/keremgocen/tagpipe)](https://goreportcard.com/report/github.com/keremgocen/tagpipe)
+[![GoDoc](https://godoc.org/github.com/keremgocen/tagpipe?status.svg)](https://godoc.org/github.com/keremgocen/tagpipe)
+
 Install
 -----
 ```
