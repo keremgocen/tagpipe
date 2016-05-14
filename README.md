@@ -3,6 +3,7 @@
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/keremgocen/tagpipe)](https://goreportcard.com/report/github.com/keremgocen/tagpipe)
 [![GoDoc](https://godoc.org/github.com/keremgocen/tagpipe?status.svg)](https://godoc.org/github.com/keremgocen/tagpipe)
+[![Build Status](https://travis-ci.org/keremgocen/tagpipe.svg?branch=master)](https://travis-ci.org/keremgocen/tagpipe)
 
 Install
 -----
@@ -12,10 +13,10 @@ go get github.com/keremgocen/tagpipe
 
 Usage
 -----
-
+Tags can be optionally passed as command line arguments. If no tags are found, a local file "tags.txt" will be used.
 
 ```
-./cmd tag1 tag2 ..
+./example tag1 tag2 ..
 ```
 
 Corner Cases
