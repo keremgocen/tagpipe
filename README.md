@@ -14,6 +14,7 @@ go get github.com/keremgocen/tagpipe
 Usage
 -----
 Tags can be optionally passed as command line arguments. If no tags are found, a local file "tags.txt" will be used.
+You can try the example program as shown below;
 
 ```
 ./example tag1 tag2 ..
