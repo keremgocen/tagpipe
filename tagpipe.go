@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,7 +14,8 @@ import (
 	"time"
 )
 
-// TODO - add doc
+// Result is returned from digesters containing the necessary information
+// about digestion result and tag count map of the file it corresponds to
 type result struct {
 	path string
 	sum  [md5.Size]byte
@@ -47,9 +49,13 @@ func (p SortedTagCounts) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 // walkFiles starts a goroutine to walk the directory tree at root and send the
 // path of each regular file on the string channel.  It sends the result of the
 // walk on the error channel.  If done is closed, walkFiles abandons its work.
-func walkFiles(done <-chan struct{}, root string) (<-chan string, <-chan error) {
+func walkFiles(done <-chan struct{}, root string) (<-chan string, <-chan error, int) {
 	paths := make(chan string)
 	errc := make(chan error, 1)
+
+	// used to optimize digester count
+	files, _ := ioutil.ReadDir(root)
+
 	go func() { // HL
 		// Close the paths channel after Walk returns.
 		defer close(paths) // HL
@@ -69,12 +75,12 @@ func walkFiles(done <-chan struct{}, root string) (<-chan string, <-chan error) 
 			return nil
 		})
 	}()
-	return paths, errc
+	return paths, errc, len(files)
 }
 
 // digester reads path names from paths and sends digests of the corresponding
 // files on c until either paths or done is closed.
-func digester(done <-chan struct{}, paths <-chan string, c chan<- result, tags []string) {
+func digester(n int, done <-chan struct{}, paths <-chan string, c chan<- result, tags []string) {
 
 	for path := range paths { // HLpaths
 		data, err := ioutil.ReadFile(path)
@@ -89,7 +95,7 @@ func digester(done <-chan struct{}, paths <-chan string, c chan<- result, tags [
 			// debug
 			var y map[string]interface{}
 			json.Unmarshal(data, &y)
-			fmt.Println("\npath:", path, " content:", y)
+			log.Println("\npath:", path, " content:", y, "d:", n)
 
 			// fmt.Printf("contents:%s,  \nisJSON:%v\n---------------------\n", string(content), true)
 			for _, tag := range tags {
@@ -97,21 +103,21 @@ func digester(done <-chan struct{}, paths <-chan string, c chan<- result, tags [
 				c := len(r.FindAllStringIndex(string(data), -1))
 				if c > 0 {
 					tM[tag] += c
+					fmt.Println("tag:", tag, " - count:", c, "d:", n)
 				}
-				fmt.Println("tag:", tag, " - count:", c)
 				// if r.Match(data) {
 				// 	fmt.Println("found tag:", tag, " in file:", path, " count:", len(r.FindAllStringSubmatchIndex(string(data), -1)))
 				// }
 			}
 
 		} else {
-			fmt.Println("\nskipping file ", path, " with invalid JSON")
+			log.Println("\nskipping file ", path, " with invalid JSON", "d:", n)
 			return
 		}
 
 		// debug
 		if len(tM) > 0 {
-			fmt.Println("\nfound tags:", tM, " in file:", path)
+			log.Println("\nfound tags:", tM, " in file:", path, "d:", n)
 		}
 
 		select {
@@ -123,30 +129,36 @@ func digester(done <-chan struct{}, paths <-chan string, c chan<- result, tags [
 	}
 }
 
-// MD5All reads all the files in the file tree rooted at root and returns a map
+// DigestAllFiles reads all the files in the file tree rooted at root and returns a map
 // from file path to the MD5 sum of the file's contents.  If the directory walk
-// fails or any read operation fails, MD5All returns an error.  In that case,
-// MD5All does not wait for inflight read operations to complete.
-func MD5All(root string, tags []string) (map[string][md5.Size]byte, error) {
-	// MD5All closes the done channel when it returns; it may do so before
+// fails or any read operation fails, DigestAllFiles returns an error.  In that case,
+// DigestAllFiles does not wait for inflight read operations to complete.
+func DigestAllFiles(root string, tags []string) (map[string][md5.Size]byte, error) {
+	// DigestAllFiles closes the done channel when it returns; it may do so before
 	// receiving all the values from c and errc.
 	done := make(chan struct{})
 	defer close(done)
 
-	paths, errc := walkFiles(done, root)
+	paths, errc, fc := walkFiles(done, root)
 
 	totaltags := make(map[string]int) // tag map keeping total counts
 
 	// Start a fixed number of goroutines to read and digest files.
 	c := make(chan result) // HLc
 	var wg sync.WaitGroup
-	const numDigesters = 20
+
+	// create as many digesters as the number of files in root path, with an upper limit 20
+	numDigesters := fc
+	if numDigesters > 20 {
+		numDigesters = 20
+	}
+
 	wg.Add(numDigesters)
 	for i := 0; i < numDigesters; i++ {
-		go func() {
-			digester(done, paths, c, tags) // HLc
+		go func(k int) {
+			digester(k, done, paths, c, tags) // HLc
 			wg.Done()
-		}()
+		}(i)
 	}
 	go func() {
 		wg.Wait()
@@ -160,7 +172,7 @@ func MD5All(root string, tags []string) (map[string][md5.Size]byte, error) {
 			return nil, r.err
 		}
 		m[r.path] = r.sum
-		fmt.Println("received tags:")
+		log.Println("received tags:")
 		for t, i := range *r.tmap {
 			fmt.Println(t, i)
 			totaltags[t] += i
@@ -252,7 +264,7 @@ func IsValidJSON(s string) bool {
 // TimeTrack utility to measure the elapsed time in ms
 func TimeTrack(start time.Time, name string) {
 	elapsed := time.Since(start)
-	fmt.Printf("\n%s took %s\n\n", name, elapsed)
+	log.Printf("\n%s took %s\n\n", name, elapsed)
 }
 
 // func main() {

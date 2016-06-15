@@ -34,7 +34,7 @@ func main() {
 
 	// Calculate the MD5 sum of all files under the specified directory,
 	// then print the results sorted by path name.
-	m, err := tagpipe.MD5All(dataPath, tags)
+	m, err := tagpipe.DigestAllFiles(dataPath, tags)
 	if err != nil {
 		fmt.Println(err)
 		return
