@@ -2,6 +2,7 @@ package tagpipe
 
 import (
 	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,41 +11,50 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"sync"
 	"time"
 )
 
 // Result is returned from digesters containing the necessary information
 // about digestion result and tag count map of the file it corresponds to
-type result struct {
-	path string
-	sum  [md5.Size]byte
-	err  error
-	tmap *map[string]int
+type Result struct {
+	Path string
+	Sum  string
+	E    error
+	T    map[string]int
 }
 
-// FileCache holds info of each file, including tags observed per file
-type FileCache struct {
-	md5  string
-	name string
-	tc   TagCount
+// cacheMap is used to cache parsed files, to avoid parsing the same file again
+var cacheMap map[string]Result
+
+// Becomes false when user disables cache via command line flags
+var uc bool // use cache
+
+// T holds tag, count pairs
+type T struct {
+	Tag   string
+	Count int
 }
 
-// Cache is used to cache parsed files, to avoid parsing the same file again
-var Cache map[string]FileCache
+// TList sorts tag, count pairs using the implemented functions below
+type TList []T
 
-// TagCount holds tags as key and their count
-type TagCount struct {
-	Key   string
-	Value int
+func (t TList) Len() int           { return len(t) }
+func (t TList) Less(i, j int) bool { return t[i].Count < t[j].Count }
+func (t TList) Swap(i, j int)      { t[i], t[j] = t[j], t[i] }
+
+// sortByTagCount sorts a tag map by counts
+func sortByTagCount(tagFrequencies map[string]int) TList {
+	tl := make(TList, len(tagFrequencies))
+	i := 0
+	for k, v := range tagFrequencies {
+		tl[i] = T{k, v}
+		i++
+	}
+	sort.Sort(sort.Reverse(tl))
+	return tl
 }
-
-// SortedTagCounts used to sort TagCounts by value
-type SortedTagCounts []TagCount
-
-func (p SortedTagCounts) Len() int           { return len(p) }
-func (p SortedTagCounts) Less(i, j int) bool { return p[i].Value < p[j].Value }
-func (p SortedTagCounts) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
 // walkFiles starts a goroutine to walk the directory tree at root and send the
 // path of each regular file on the string channel.  It sends the result of the
@@ -80,51 +90,59 @@ func walkFiles(done <-chan struct{}, root string) (<-chan string, <-chan error, 
 
 // digester reads path names from paths and sends digests of the corresponding
 // files on c until either paths or done is closed.
-func digester(n int, done <-chan struct{}, paths <-chan string, c chan<- result, tags []string) {
+func digester(done <-chan struct{}, paths <-chan string, c chan<- Result, tags []string) {
 
 	for path := range paths { // HLpaths
 		data, err := ioutil.ReadFile(path)
 
+		tM := make(map[string]int) // tag map keeping total counts
+
+		// TODO before parsing tags, check if the file was processed before
+		// skip if file is found in cache
+		bytesMD5 := md5.Sum(data)
+		sumMD5 := hex.EncodeToString(bytesMD5[:])
+		savedResult, ok := cacheMap[sumMD5]
+
+		if uc && ok {
+			log.Println("identical file found in cache", path)
+			c <- savedResult
+			continue
+		}
+
 		// discard files containing invalid JSON
 		fileHasValidJSON := IsValidJSON(string(data))
 
-		tM := make(map[string]int) // tag map keeping total counts
-
 		if fileHasValidJSON {
 
-			// debug
-			var y map[string]interface{}
-			json.Unmarshal(data, &y)
-			log.Println("\npath:", path, " content:", y, "d:", n)
-
-			// fmt.Printf("contents:%s,  \nisJSON:%v\n---------------------\n", string(content), true)
 			for _, tag := range tags {
 				r, _ := regexp.Compile("\"" + tag + "\"")
 				c := len(r.FindAllStringIndex(string(data), -1))
 				if c > 0 {
 					tM[tag] += c
-					fmt.Println("tag:", tag, " - count:", c, "d:", n)
 				}
-				// if r.Match(data) {
-				// 	fmt.Println("found tag:", tag, " in file:", path, " count:", len(r.FindAllStringSubmatchIndex(string(data), -1)))
-				// }
+			}
+
+			if uc {
+				if cacheMap == nil {
+					cacheMap = map[string]Result{}
+				}
+				cacheMap[sumMD5] = Result{path, sumMD5, err, tM}
 			}
 
 		} else {
-			log.Println("\nskipping file ", path, " with invalid JSON", "d:", n)
-			return
-		}
-
-		// debug
-		if len(tM) > 0 {
-			log.Println("\nfound tags:", tM, " in file:", path, "d:", n)
+			log.Println("skipping file ", path, " with invalid JSON")
+			continue
 		}
 
 		select {
 		case <-done:
 			return
 		default:
-			c <- result{path, md5.Sum(data), err, &tM}
+			// Path string
+			// Sum  string
+			// E  error
+			// T map[string]int
+			c <- Result{Path: path, Sum: sumMD5, E: err, T: tM}
 		}
 	}
 }
@@ -133,18 +151,24 @@ func digester(n int, done <-chan struct{}, paths <-chan string, c chan<- result,
 // from file path to the MD5 sum of the file's contents.  If the directory walk
 // fails or any read operation fails, DigestAllFiles returns an error.  In that case,
 // DigestAllFiles does not wait for inflight read operations to complete.
-func DigestAllFiles(root string, tags []string) (map[string][md5.Size]byte, error) {
+func DigestAllFiles(root string, tags []string, useCache bool) (TList, error) {
+	defer TimeTrack(time.Now(), "DigestAllFiles")
+
 	// DigestAllFiles closes the done channel when it returns; it may do so before
 	// receiving all the values from c and errc.
 	done := make(chan struct{})
 	defer close(done)
 
+	// prepare cache
+	uc = useCache
+	if uc {
+		cacheMap = LoadCache()
+	}
+
 	paths, errc, fc := walkFiles(done, root)
 
-	totaltags := make(map[string]int) // tag map keeping total counts
-
 	// Start a fixed number of goroutines to read and digest files.
-	c := make(chan result) // HLc
+	c := make(chan Result) // HLc
 	var wg sync.WaitGroup
 
 	// create as many digesters as the number of files in root path, with an upper limit 20
@@ -155,105 +179,82 @@ func DigestAllFiles(root string, tags []string) (map[string][md5.Size]byte, erro
 
 	wg.Add(numDigesters)
 	for i := 0; i < numDigesters; i++ {
-		go func(k int) {
-			digester(k, done, paths, c, tags) // HLc
+		go func() {
+			digester(done, paths, c, tags) // HLc
 			wg.Done()
-		}(i)
+		}()
 	}
+
 	go func() {
 		wg.Wait()
-		close(c) // HLc
+		close(c)
 	}()
-	// End of pipeline. OMIT
 
-	m := make(map[string][md5.Size]byte)
+	m := make(map[string]int)
 	for r := range c {
-		if r.err != nil {
-			return nil, r.err
+		if r.E != nil {
+			return nil, r.E
 		}
-		m[r.path] = r.sum
-		log.Println("received tags:")
-		for t, i := range *r.tmap {
+
+		log.Println("received tags for", r.Path)
+
+		for t, i := range r.T {
+
 			fmt.Println(t, i)
-			totaltags[t] += i
+
+			m[t] += r.T[t]
 		}
 	}
 
-	fmt.Println(totaltags)
+	if uc {
+		log.Println("saving cache..", SaveCache(cacheMap))
+	}
+
 	// Check whether the Walk failed.
 	if err := <-errc; err != nil { // HLerrc
 		return nil, err
 	}
-	return m, nil
+
+	return sortByTagCount(m), nil
 }
 
-// // CountTagsInFile counts all given tags inside the file
-// func CountTagsInFile(file *strings.Reader, tag string) int {
-//
-// 	var telephone = regexp.MustCompile(`[A-Za-z]+`)
-// 	// var telephone = regexp.MustCompile(`\(\d+\)\s\d+-\d+`)
-//
-// 	// do I need buffered channels here?
-// 	tags := make(chan string)
-// 	results := make(chan int)
-//
-// 	// I think we need a wait group, not sure.
-// 	wg := new(sync.WaitGroup)
-//
-// 	// start up some workers that will block and wait?
-// 	for w := 1; w <= 3; w++ {
-// 		wg.Add(1)
-// 		go MatchTags(tags, results, wg, telephone)
-// 	}
-//
-// 	// Go over a file line by line and queue up a ton of work
-// 	go func() {
-// 		scanner := bufio.NewScanner(file)
-// 		for scanner.Scan() {
-// 			// Later I want to create a buffer of lines, not just line-by-line here ...
-// 			tags <- scanner.Text()
-// 		}
-// 		close(tags)
-// 	}()
-//
-// 	func() {
-// 		scanner := bufio.NewScanner(file)
-// 		for scanner.Scan() {
-// 			// Later I want to create a buffer of lines, not just line-by-line here ...
-// 			tags <- scanner.Text()
-// 		}
-// 		close(tags)
-// 	}()
-//
-// 	// Now collect all the results...
-// 	// But first, make sure we close the result channel when everything was processed
-// 	go func() {
-// 		wg.Wait()
-// 		close(results)
-// 	}()
-//
-// 	// Add up the results from the results channel.
-// 	counts := 0
-// 	for v := range results {
-// 		counts += v
-// 	}
-//
-// 	return counts
-// }
-//
-// // MatchTags counts tags in the given file
-// func MatchTags(tags <-chan string, results chan<- int, wg *sync.WaitGroup, telephone *regexp.Regexp) {
-// 	// func matchTags(tags <-chan string, results chan<- int, wg *sync.WaitGroup, telephone *regexp.Regexp) {
-// 	// Decreasing internal counter for wait-group as soon as goroutine finishes
-// 	defer wg.Done()
-//
-// 	// eventually I want to have a []string channel to work on a chunk of lines not just one line of text
-// 	for j := range tags {
-// 		if telephone.MatchString(j) {
-// 			results <- 1
-// 		}
-// 	}
-// }
+// LoadCache tries to parse a previously saved cache file
+func LoadCache() map[string]Result {
+	defer TimeTrack(time.Now(), "LoadCache")
+
+	dat, e1 := ioutil.ReadFile("cache")
+	if e1 != nil {
+		log.Println(e1, ", creating new cache")
+		return nil
+	}
+
+	if e2 := json.Unmarshal(dat, &cacheMap); e2 != nil {
+		if cacheMap == nil {
+			cacheMap = make(map[string]Result)
+		}
+		return nil
+	}
+
+	return cacheMap
+}
+
+// SaveCache will save parsing results of all files in a file named "cache"
+func SaveCache(cache map[string]Result) bool {
+	defer TimeTrack(time.Now(), "SaveCache")
+
+	// marshall cache into JSON array
+	cacheJSON, errj := json.Marshal(cache)
+	if errj != nil {
+		log.Println(errj)
+		return false
+	}
+
+	err := ioutil.WriteFile("cache", cacheJSON, 0644)
+	if err != nil {
+		return false
+	}
+	return true
+}
 
 // IsValidJSON checks if the given string has a valid JSON format, generalized
 func IsValidJSON(s string) bool {
@@ -264,12 +265,5 @@ func IsValidJSON(s string) bool {
 // TimeTrack utility to measure the elapsed time in ms
 func TimeTrack(start time.Time, name string) {
 	elapsed := time.Since(start)
-	log.Printf("\n%s took %s\n\n", name, elapsed)
+	fmt.Printf("\n%s took %s\n\n", name, elapsed)
 }
-
-// func main() {
-// 	defer TimeTrack(time.Now(), "total execution")
-//
-//
-//
-// }
