@@ -24,3 +24,7 @@ _testmain.go
 *.prof
 
 README-orig.md
+
+run/cache
+
+run/run

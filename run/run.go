@@ -18,7 +18,7 @@ var cachePtr bool
 func init() {
 	flag.StringVar(&dataPath, "d", "../data/", "data folder path is not set, use: --d <path-to-files>")
 	flag.StringVar(&configPath, "t", "../tags.txt", "tags file path is not set, use: --t <path-to-tags>")
-	flag.BoolVar(&cachePtr, "c", true, "-c=false disables cache")
+	flag.BoolVar(&cachePtr, "c", true, "-c=false overrides cache")
 }
 
 func main() {
@@ -41,6 +41,8 @@ func main() {
 		log.Println("Fetching tags from command line arguments..")
 		tags = flag.Args()
 	}
+
+	log.Println("tags:", tags)
 
 	log.Println("JSON files will be parsed at location:", dataPath)
 

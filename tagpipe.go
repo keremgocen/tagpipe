@@ -196,6 +196,11 @@ func DigestAllFiles(root string, tags []string, useCache bool) (TList, error) {
 			return nil, r.E
 		}
 
+		if len(r.T) == 0 {
+			log.Println("no tags found in", r.Path)
+			continue
+		}
+
 		log.Println("received tags for", r.Path)
 
 		for t, i := range r.T {
@@ -206,9 +211,8 @@ func DigestAllFiles(root string, tags []string, useCache bool) (TList, error) {
 		}
 	}
 
-	if uc {
-		log.Println("saving cache..", SaveCache(cacheMap))
-	}
+	// override cache
+	log.Println("saving cache..", SaveCache(cacheMap))
 
 	// Check whether the Walk failed.
 	if err := <-errc; err != nil { // HLerrc
