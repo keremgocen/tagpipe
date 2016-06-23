@@ -11,6 +11,8 @@ Install
 go get github.com/keremgocen/tagpipe
 ```
 
+> Tested using go version go1.6.2 darwin/amd64 on OS X 10.11.5
+
 Usage
 -----
 
